@@ -1,0 +1,24 @@
+[Unit]
+Description=LabCtl REST API
+After=network-online.target fwdd.service
+Wants=network-online.target fwdd.service
+
+[Service]
+Type=simple
+User=labwebapp
+SupplementaryGroups=fwdd-access
+WorkingDirectory=/srv/labctl
+Environment=PYTHONUNBUFFERED=1
+EnvironmentFile=-/etc/labctl/api.env
+ExecStart=/srv/labctl/.venv/bin/uvicorn labctl.api.app:app --host 127.0.0.1 --port 8000
+Restart=on-failure
+RestartSec=2
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=yes
+ReadWritePaths=/var/lib/labctl
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+
+[Install]
+WantedBy=multi-user.target

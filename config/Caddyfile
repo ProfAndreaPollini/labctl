@@ -1,0 +1,47 @@
+# Set ADMIN_DOMAIN and AUTHENTIK_URL in the Caddy service environment.
+{$ADMIN_DOMAIN} {
+	tls internal
+	encode zstd gzip
+
+	@authentik_outpost path /outpost.goauthentik.io/*
+	handle @authentik_outpost {
+		reverse_proxy {$AUTHENTIK_URL}
+	}
+
+	handle {
+		request_header -X-Remote-User
+		request_header -X-Remote-Name
+		request_header -X-Remote-Groups
+		request_header -X-Remote-Guid
+		request_header -X-Authentik-Username
+		request_header -X-Authentik-Groups
+		request_header -X-Authentik-Email
+		request_header -X-Authentik-Name
+		request_header -X-Authentik-Uid
+
+		forward_auth {$AUTHENTIK_URL} {
+			uri /outpost.goauthentik.io/auth/caddy
+			copy_headers X-Authentik-Username X-Authentik-Groups X-Authentik-Email X-Authentik-Name X-Authentik-Uid
+		}
+
+		@api path /api/*
+		handle @api {
+			reverse_proxy 127.0.0.1:8000 {
+				header_up -X-Remote-User
+				header_up -X-Remote-Name
+				header_up -X-Remote-Groups
+				header_up -X-Remote-Guid
+				header_up X-Remote-User {http.request.header.X-Authentik-Username}
+				header_up X-Remote-Name {http.request.header.X-Authentik-Name}
+				header_up X-Remote-Groups {http.request.header.X-Authentik-Groups}
+				header_up X-Remote-Guid {http.request.header.X-Authentik-Uid}
+			}
+		}
+
+		handle {
+			root * /srv/labctl/apps/admin-app/build
+			try_files {path} /200.html
+			file_server
+		}
+	}
+}

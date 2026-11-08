@@ -1,0 +1,43 @@
+[project]
+name = "labctl"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.13"
+dependencies = [
+    "alembic>=1.20.1",
+    "fastapi>=0.162.2",
+    "httpx>=0.28.1",
+    "sqlalchemy>=2.1.8",
+    "uvicorn>=0.54.0",
+]
+
+# [project.scripts]
+# labctl = "labctl:main"
+
+[project.scripts]
+labctl-init-db = "labctl.db.init_db:main"
+labctl-fwdd = "labctl.fwdd:main"
+
+[build-system]
+requires = ["uv_build>=0.13.7,<0.14.0"]
+build-backend = "uv_build"
+
+[dependency-groups]
+dev = [
+    "pytest>=9.2.0",
+]
+
+
+
+[tool.alembic]
+script_location = "%(here)s/migrations"
+file_template = "%%(rev)s_%%(slug)s"
+prepend_sys_path = ["."]
+version_locations = ["%(here)s/migrations/versions"]
+
+[[tool.alembic.post_write_hooks]]
+name = "ruff"
+type = "console_scripts"
+entrypoint = "ruff"
+options = "format REVISION_SCRIPT_FILENAME"

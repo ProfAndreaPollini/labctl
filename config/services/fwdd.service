@@ -1,0 +1,26 @@
+[Unit]
+Description=Lab Network Firewall Enforcement Daemon (fwdd)
+After=network-online.target nftables.service
+
+[Service]
+Type=simple
+User=root
+Group=fwdd-access
+RuntimeDirectory=fwdd
+RuntimeDirectoryMode=0750
+ExecStart=/usr/local/sbin/fwdd --socket /run/fwdd/control.sock --db /var/lib/labctl/state.db
+Restart=always
+RestartSec=1s
+
+# Hardening Systemd
+CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_RAW CAP_DAC_READ_SEARCH
+AmbientCapabilities=CAP_NET_ADMIN CAP_NET_RAW
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+ReadWritePaths=/run/fwdd /var/lib/labctl
+PrivateTmp=yes
+ProtectKernelModules=yes
+ProtectKernelTunables=yes
+RestrictAddressFamilies=AF_UNIX AF_NETLINK
+SystemCallFilter=@system-service @network-io
