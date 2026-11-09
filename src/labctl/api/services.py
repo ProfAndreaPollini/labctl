@@ -113,6 +113,27 @@ class ProxmoxClusterClient:
         self.verify_ssl = verify_ssl
         self.mock_mode = mock_mode
 
+    def check_health(self) -> Dict[str, str]:
+        if self.mock_mode:
+            return {"mode": "mock"}
+
+        with httpx.Client(
+            base_url=self.base_url,
+            headers=self.headers,
+            verify=self.verify_ssl,
+            timeout=5.0,
+        ) as client:
+            response = client.get("/api2/json/version")
+            response.raise_for_status()
+            payload = response.json()
+
+        data = payload.get("data") if isinstance(payload, dict) else None
+        version = data.get("version") if isinstance(data, dict) else None
+        if not isinstance(version, str) or not version:
+            raise ValueError("Risposta versione Proxmox non valida.")
+
+        return {"mode": "live", "version": version}
+
     def inspect_and_prepare_lxc(self, vmid: int, expected_username: str, expected_vnet: str) -> Tuple[str, str, str]:
         """
         1. Individua su quale nodo del cluster si trova il container `vmid`.

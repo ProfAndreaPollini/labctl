@@ -133,6 +133,21 @@ def test_container_listing_requires_admin(admin_client):
     assert response.status_code == 403
 
 
+def test_first_login_parses_pipe_delimited_authentik_groups(admin_client):
+    _, test_engine = admin_client
+    with test_engine.begin() as conn:
+        user = api.get_current_user(
+            conn,
+            x_remote_user="new-student",
+            x_remote_name=None,
+            x_remote_groups="Other|4A-INF",
+            x_remote_guid=None,
+        )
+
+    assert user.ruolo == "STUDENT"
+    assert user.codice_classe == "4A-INF"
+
+
 def test_admin_deletion_deprovisions_before_removing_database_record(admin_client, monkeypatch):
     client, test_engine = admin_client
     calls = []
@@ -197,3 +212,62 @@ def test_admin_network_state_enriches_authorized_and_active_endpoints(admin_clie
     assert body["authorized_endpoints"][0]["container"]["vmid"] == 10401
     assert body["active_connections"][0]["source_container"]["username"] == "student"
     assert body["active_connections"][0]["destination_container"] is None
+
+
+def test_admin_system_health_reports_service_statuses(admin_client, monkeypatch):
+    client, _ = admin_client
+    monkeypatch.setattr(
+        api.fwdd_client,
+        "call",
+        lambda action, **payload: {"in_sync": True, "drifted_items": []},
+    )
+    monkeypatch.setattr(api.pve_client, "check_health", lambda: {"mode": "live", "version": "9.2"})
+
+    response = client.get("/api/admin/system/health", headers={"X-Remote-User": "admin"})
+
+    assert response.status_code == 200
+    body = response.json()
+    assert {service["id"]: service["status"] for service in body["services"]} == {
+        "api": "ok",
+        "database": "ok",
+        "fwdd": "ok",
+        "proxmox": "ok",
+    }
+    assert body["services"][-1]["detail"] == "API raggiungibile · versione 9.2"
+
+
+def test_admin_system_health_reports_unavailable_fwdd(admin_client, monkeypatch):
+    client, _ = admin_client
+
+    def reject_fwdd(action, **payload):
+        raise FwddClientError("ERR_FWDD_UNAVAILABLE", "Socket fwdd non trovato")
+
+    monkeypatch.setattr(api.fwdd_client, "call", reject_fwdd)
+    monkeypatch.setattr(api.pve_client, "check_health", lambda: {"mode": "mock"})
+
+    response = client.get("/api/admin/system/health", headers={"X-Remote-User": "admin"})
+
+    assert response.status_code == 200
+    services = {service["id"]: service for service in response.json()["services"]}
+    assert services["fwdd"]["status"] == "error"
+    assert services["fwdd"]["detail"] == "Socket fwdd non trovato"
+    assert services["proxmox"]["status"] == "mock"
+
+
+def test_admin_provisioning_drift_reports_kernel_and_database_state(admin_client, monkeypatch):
+    client, _ = admin_client
+    drifted = [{"vmid": 10401, "expected": ["vnet4a", "bc:24:11:00:28:91", "10.104.0.10"]}]
+    monkeypatch.setattr(
+        api.fwdd_client,
+        "call",
+        lambda action, **payload: {"in_sync": False, "drifted_items": drifted},
+    )
+
+    response = client.get("/api/admin/provisioning/drift", headers={"X-Remote-User": "admin"})
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["in_sync"] is False
+    assert body["fwdd_in_sync"] is False
+    assert body["kernel_drifted_items"] == drifted
+    assert body["db_pending_items"] == []

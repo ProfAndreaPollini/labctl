@@ -1,47 +1,63 @@
-# Set ADMIN_DOMAIN and AUTHENTIK_URL in the Caddy service environment.
-{$ADMIN_DOMAIN} {
-	tls internal
-	encode zstd gzip
+192.168.1.11:443 {
+    tls internal
+    encode zstd gzip
 
-	@authentik_outpost path /outpost.goauthentik.io/*
-	handle @authentik_outpost {
-		reverse_proxy {$AUTHENTIK_URL}
-	}
+    log {
+        output file /var/log/caddy/authentik-headers.log
+        format json
+    }
 
-	handle {
-		request_header -X-Remote-User
-		request_header -X-Remote-Name
-		request_header -X-Remote-Groups
-		request_header -X-Remote-Guid
-		request_header -X-Authentik-Username
-		request_header -X-Authentik-Groups
-		request_header -X-Authentik-Email
-		request_header -X-Authentik-Name
-		request_header -X-Authentik-Uid
+    # Gestione dell'outpost di Authentik (invariata)
+    @authentik_outpost path /outpost.goauthentik.io/*
+    handle @authentik_outpost {
+        reverse_proxy {$AUTHENTIK_URL}
+    }
 
-		forward_auth {$AUTHENTIK_URL} {
-			uri /outpost.goauthentik.io/auth/caddy
-			copy_headers X-Authentik-Username X-Authentik-Groups X-Authentik-Email X-Authentik-Name X-Authentik-Uid
-		}
+    # Blocco principale per la tua applicazione
+    handle {
+        # Usa 'route' per forzare l'ordine di esecuzione
+        route {
+            # 1. (Opzionale) Rimuovi eventuali header malevoli forniti dal client.
+            #    Questo è sicuro perché 'forward_auth' li sovrascriverà con quelli veri.
+            request_header -X-Authentik-Username
+            request_header -X-Authentik-Groups
+            request_header -X-Authentik-Email
+            request_header -X-Authentik-Name
+            request_header -X-Authentik-Uid
 
-		@api path /api/*
-		handle @api {
-			reverse_proxy 127.0.0.1:8000 {
-				header_up -X-Remote-User
-				header_up -X-Remote-Name
-				header_up -X-Remote-Groups
-				header_up -X-Remote-Guid
-				header_up X-Remote-User {http.request.header.X-Authentik-Username}
-				header_up X-Remote-Name {http.request.header.X-Authentik-Name}
-				header_up X-Remote-Groups {http.request.header.X-Authentik-Groups}
-				header_up X-Remote-Guid {http.request.header.X-Authentik-Uid}
-			}
-		}
+            # 2. Esegui l'autenticazione.
+            forward_auth {$AUTHENTIK_URL} {
+                uri /outpost.goauthentik.io/auth/caddy
+                copy_headers X-Authentik-Username X-Authentik-Groups X-Authentik-Entitlements X-Authentik-Email X-Authentik-Name X-Authentik-Uid X-Authentik-Jwt X-Authentik-Meta-Jwks X-Authentik-Meta-Outpost X-Authentik-Meta-Provider X-Authentik-Meta-App X-Authentik-Meta-Version authorization
+                trusted_proxies private_ranges
+            }
 
-		handle {
-			root * /srv/labctl/apps/admin-app/build
-			try_files {path} /200.html
-			file_server
-		}
-	}
+            # Log per debug
+            log_append ak_user {http.request.header.X-Authentik-Username}
+            log_append ak_uid  {http.request.header.X-Authentik-Uid}
+            log_append ak_groups {http.request.header.X-Authentik-Groups}       
+
+            # 3. Gestione delle API
+            @api path /api/*
+            handle @api {
+                reverse_proxy 127.0.0.1:8000 {
+                    header_up -X-Remote-User
+                    header_up -X-Remote-Name
+                    header_up -X-Remote-Groups
+                    header_up -X-Remote-Guid
+                    header_up X-Remote-User {http.request.header.X-Authentik-Username}
+                    header_up X-Remote-Name {http.request.header.X-Authentik-Name}
+                    header_up X-Remote-Groups {http.request.header.X-Authentik-Groups}
+                    header_up X-Remote-Guid {http.request.header.X-Authentik-Uid}
+                }
+            }
+
+            # 4. Gestione dei file statici (fallback)
+            handle {
+                root * /srv/labctl/apps/admin-app/build
+                try_files {path} /200.html
+                file_server
+            }
+        }
+    }
 }

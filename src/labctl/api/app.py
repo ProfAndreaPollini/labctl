@@ -13,14 +13,16 @@ import ipaddress
 import json
 import logging
 import os
+import re
 from datetime import datetime, timezone
 from typing import Any, Dict, Generator, List, Literal, Optional  # noqa: UP035
 
+import httpx
 from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request, status
 from pydantic import BaseModel, Field, field_validator
 from sqlalchemy import String, and_, cast, delete, func, insert, or_, select, update
 from sqlalchemy.engine import Connection, Engine
-from sqlalchemy.exc import IntegrityError
+from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 
 from labctl.api.services import (
     FwddClientError,
@@ -249,7 +251,7 @@ def get_current_user(
         )
 
     # --- ONBOARDING AL PRIMO LOGIN ---
-    groups_raw = [g.strip() for g in (x_remote_groups or "").split(",") if g.strip()]
+    groups_raw = [g.strip() for g in re.split(r"[,|]", x_remote_groups or "") if g.strip()]
     ruolo: Literal["STUDENT", "TEACHER", "ADMIN"] = "STUDENT"
     if any(g.upper() in ("ADMINS", "DOMAIN ADMINS", "LAB_ADMIN") for g in groups_raw):
         ruolo = "ADMIN"
@@ -1096,12 +1098,71 @@ def check_provisioning_drift(
         select(provisioning_status).where(provisioning_status.c.actual_state != "SYNCED")
     ).fetchall()
 
-    fwdd_verify = fwdd_client.call("verify_state", scope="full")
+    try:
+        fwdd_verify = fwdd_client.call("verify_state", scope="full")
+    except FwddClientError as ferr:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=f"Verifica fwdd non disponibile: {ferr.message}",
+        ) from ferr
+
     return {
+        "checked_at": utc_now(),
+        "in_sync": fwdd_verify.get("in_sync", False) and not db_drifted,
         "fwdd_in_sync": fwdd_verify.get("in_sync", False),
         "kernel_drifted_items": fwdd_verify.get("drifted_items", []),
         "db_pending_items": [dict(r._mapping) for r in db_drifted],
     }
+
+
+@app.get("/api/admin/system/health", tags=["Admin"])
+def get_admin_system_health(
+    user: CurrentUser = Depends(require_role("ADMIN")),
+    conn: Connection = Depends(get_db_conn),
+):
+    """Controlla la raggiungibilità del database, fwdd e Proxmox."""
+    services = [
+        {"id": "api", "label": "API", "status": "ok", "detail": "Richiesta health ricevuta."},
+    ]
+
+    try:
+        conn.execute(select(1)).scalar_one()
+    except SQLAlchemyError as exc:
+        services.append({"id": "database", "label": "Database", "status": "error", "detail": str(exc)})
+    else:
+        services.append(
+            {"id": "database", "label": "Database", "status": "ok", "detail": "Connessione disponibile."}
+        )
+
+    try:
+        fwdd_client.call("verify_state", scope="full")
+    except FwddClientError as ferr:
+        services.append({"id": "fwdd", "label": "fwdd", "status": "error", "detail": ferr.message})
+    else:
+        services.append(
+            {"id": "fwdd", "label": "fwdd", "status": "ok", "detail": "Socket e verifica nftables disponibili."}
+        )
+
+    try:
+        proxmox = pve_client.check_health()
+    except (httpx.HTTPError, ValueError) as exc:
+        services.append({"id": "proxmox", "label": "Proxmox", "status": "error", "detail": str(exc)})
+    else:
+        if proxmox["mode"] == "mock":
+            services.append(
+                {"id": "proxmox", "label": "Proxmox", "status": "mock", "detail": "Modalità mock attiva."}
+            )
+        else:
+            services.append(
+                {
+                    "id": "proxmox",
+                    "label": "Proxmox",
+                    "status": "ok",
+                    "detail": f"API raggiungibile · versione {proxmox['version']}",
+                }
+            )
+
+    return {"checked_at": utc_now(), "services": services}
 
 
 @app.post("/api/admin/fwdd/reconcile", tags=["Admin"])

@@ -58,6 +58,44 @@ export interface NetworkState {
 	observed_at: string;
 }
 
+export interface ServiceHealth {
+	id: 'api' | 'database' | 'fwdd' | 'proxmox';
+	label: string;
+	status: 'ok' | 'error' | 'mock';
+	detail: string;
+}
+
+export interface SystemHealth {
+	checked_at: string;
+	services: ServiceHealth[];
+}
+
+export interface KernelDriftItem {
+	vmid: number;
+	expected: [string, string, string];
+}
+
+export interface ProvisioningDriftItem {
+	vmid: number;
+	desired_state: string;
+	desired_ip: string;
+	desired_mac: string | null;
+	desired_vnet: string;
+	actual_state: string;
+	actual_ip: string | null;
+	actual_mac: string | null;
+	last_error_code: string | null;
+	last_error_msg: string | null;
+}
+
+export interface ProvisioningDrift {
+	checked_at: string;
+	in_sync: boolean;
+	fwdd_in_sync: boolean;
+	kernel_drifted_items: KernelDriftItem[];
+	db_pending_items: ProvisioningDriftItem[];
+}
+
 async function request<T>(url: string, init?: RequestInit): Promise<T> {
 	const response = await fetch(url, {
 		...init,
@@ -93,6 +131,14 @@ export function listContainers(params: { search: string; limit: number; offset: 
 
 export function getNetworkState() {
 	return request<NetworkState>('/api/admin/network-state');
+}
+
+export function getSystemHealth() {
+	return request<SystemHealth>('/api/admin/system/health');
+}
+
+export function getProvisioningDrift() {
+	return request<ProvisioningDrift>('/api/admin/provisioning/drift');
 }
 
 export function deleteContainer(vmid: number) {

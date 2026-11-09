@@ -3,10 +3,15 @@
 	import { onMount } from 'svelte';
 	import {
 		deleteContainer,
+		getProvisioningDrift,
 		getNetworkState,
+		getSystemHealth,
 		listContainers,
 		type ActiveConnection,
 		type ContainerRecord,
+		type ProvisioningDrift,
+		type ServiceHealth,
+		type SystemHealth,
 		type NetworkState
 	} from '#lib/containers.js';
 
@@ -29,12 +34,35 @@
 	let searchTimer: ReturnType<typeof setTimeout> | undefined;
 	let requestVersion = 0;
 	let networkRequestInFlight = false;
+	let healthRequestInFlight = false;
+	let driftRequestInFlight = false;
 	let lastNetworkUpdate = $state('');
+	let health = $state<SystemHealth | null>(null);
+	let healthLoading = $state(true);
+	let healthError = $state('');
+	let lastHealthUpdate = $state('');
+	let drift = $state<ProvisioningDrift | null>(null);
+	let driftLoading = $state(true);
+	let driftError = $state('');
 
 	const page = $derived(Math.floor(offset / pageSize) + 1);
 	const pageCount = $derived(Math.max(1, Math.ceil(total / pageSize)));
 	const rangeStart = $derived(total === 0 ? 0 : offset + 1);
 	const rangeEnd = $derived(Math.min(offset + containers.length, total));
+	const overallHealth = $derived(
+		healthError || (!health && !healthLoading)
+			? 'error'
+			: !health || healthLoading
+				? 'loading'
+				: health.services.some((service) => service.status === 'error')
+					? 'error'
+					: health.services.some((service) => service.status === 'mock')
+						? 'warning'
+						: 'ok'
+	);
+	const driftCount = $derived(
+		(drift?.kernel_drifted_items.length ?? 0) + (drift?.db_pending_items.length ?? 0)
+	);
 
 	async function loadContainers() {
 		const version = ++requestVersion;
@@ -71,8 +99,43 @@
 		}
 	}
 
+	async function loadSystemHealth() {
+		if (healthRequestInFlight) return;
+		healthRequestInFlight = true;
+		healthLoading = true;
+		healthError = '';
+		try {
+			health = await getSystemHealth();
+			lastHealthUpdate = health.checked_at;
+		} catch (cause) {
+			healthError = cause instanceof Error ? cause.message : 'Stato dei servizi non disponibile.';
+		} finally {
+			healthRequestInFlight = false;
+			healthLoading = false;
+		}
+	}
+
+	async function loadProvisioningDrift() {
+		if (driftRequestInFlight) return;
+		driftRequestInFlight = true;
+		driftLoading = true;
+		driftError = '';
+		try {
+			drift = await getProvisioningDrift();
+		} catch (cause) {
+			driftError = cause instanceof Error ? cause.message : 'Verifica drift non disponibile.';
+		} finally {
+			driftRequestInFlight = false;
+			driftLoading = false;
+		}
+	}
+
+	function refreshDiagnostics() {
+		void Promise.all([loadSystemHealth(), loadProvisioningDrift()]);
+	}
+
 	function refreshAll() {
-		void Promise.all([loadContainers(), loadNetworkState()]);
+		void Promise.all([loadContainers(), loadNetworkState(), loadSystemHealth(), loadProvisioningDrift()]);
 	}
 
 	function onSearchInput(event: Event) {
@@ -129,6 +192,12 @@
 		return 'state-pending';
 	}
 
+	function serviceStateLabel(state: ServiceHealth['status']) {
+		if (state === 'ok') return 'Operativo';
+		if (state === 'mock') return 'Mock';
+		return 'Non disponibile';
+	}
+
 	function connectionPeer(connection: ActiveConnection, side: 'source' | 'destination') {
 		const ip = side === 'source' ? connection.source_ip : connection.destination_ip;
 		const port = side === 'source' ? connection.source_port : connection.destination_port;
@@ -149,14 +218,19 @@
 		};
 		window.addEventListener('keydown', onShortcut);
 		const refreshNetworkWhenVisible = () => {
-			if (document.visibilityState === 'visible') void loadNetworkState();
+			if (document.visibilityState === 'visible') {
+				void loadNetworkState();
+				refreshDiagnostics();
+			}
 		};
 		refreshAll();
 		const networkRefresh = window.setInterval(refreshNetworkWhenVisible, 15000);
+		const diagnosticsRefresh = window.setInterval(refreshDiagnostics, 30000);
 		document.addEventListener('visibilitychange', refreshNetworkWhenVisible);
 		return () => {
 			window.removeEventListener('keydown', onShortcut);
 			window.clearInterval(networkRefresh);
+			window.clearInterval(diagnosticsRefresh);
 			document.removeEventListener('visibilitychange', refreshNetworkWhenVisible);
 			if (searchTimer) clearTimeout(searchTimer);
 		};
@@ -211,7 +285,20 @@
 				<span>LabCtl</span><span class="crumb-slash">/</span>Amministrazione
 			</div>
 			<div class="topbar-right">
-				<span class="live-indicator"><i></i> Sistema operativo</span>
+				<span
+					class="live-indicator"
+					class:live-error={overallHealth === 'error'}
+					class:live-warning={overallHealth === 'warning'}
+					class:live-loading={overallHealth === 'loading'}
+				>
+					<i></i>{overallHealth === 'ok'
+						? 'Servizi operativi'
+						: overallHealth === 'warning'
+							? 'Modalità mock'
+							: overallHealth === 'error'
+								? 'Servizi degradati'
+								: 'Verifica servizi…'}
+				</span>
 				<span class="avatar" aria-label="Amministratore">A</span>
 			</div>
 		</header>
@@ -288,6 +375,126 @@
 					</div>
 					<span class="summary-note">conntrack</span>
 				</div>
+			</div>
+
+			<div class="diagnostics-grid">
+				<section class="diagnostic-panel" aria-labelledby="health-title">
+					<div class="diagnostic-heading">
+						<div>
+							<h2 id="health-title">Salute dei servizi</h2>
+							<p>Verifica API, database, fwdd e Proxmox.</p>
+						</div>
+						<button
+							class="button button-secondary diagnostic-refresh"
+							disabled={healthLoading}
+							onclick={() => void loadSystemHealth()}
+						>
+							Aggiorna
+						</button>
+					</div>
+					{#if healthError}
+						<div class="diagnostic-error" role="alert">{healthError}</div>
+					{/if}
+					<div class="service-grid">
+						{#if healthLoading && !health}
+							<div class="diagnostic-empty">Verifica dei servizi…</div>
+						{:else if health}
+							{#each health.services as service (service.id)}
+								<div class={`service-card service-${service.status}`}>
+									<span class="service-dot"></span>
+									<div class="service-copy">
+										<strong>{service.label}</strong>
+										<small>{service.detail}</small>
+									</div>
+									<span class="service-badge">{serviceStateLabel(service.status)}</span>
+								</div>
+							{/each}
+						{:else}
+							<div class="diagnostic-empty">Stato servizi non disponibile.</div>
+						{/if}
+					</div>
+					<div class="diagnostic-footer">
+						<span>
+							{lastHealthUpdate
+								? `Controllato ${new Intl.DateTimeFormat('it-IT', { timeStyle: 'medium' }).format(new Date(lastHealthUpdate))}`
+								: ''}
+						</span>
+						{#if healthLoading}<span>Aggiornamento…</span>{/if}
+					</div>
+				</section>
+
+				<section class="diagnostic-panel" aria-labelledby="drift-title">
+					<div class="diagnostic-heading">
+						<div>
+							<h2 id="drift-title">Drift di provisioning</h2>
+							<p>Confronto tra registro SQLite e stato nftables.</p>
+						</div>
+						<button
+							class="button button-secondary diagnostic-refresh"
+							disabled={driftLoading}
+							onclick={() => void loadProvisioningDrift()}
+						>
+							Controlla
+						</button>
+					</div>
+					{#if driftError}
+						<div class="diagnostic-error" role="alert">{driftError}</div>
+					{:else if driftLoading && !drift}
+						<div class="diagnostic-empty">Verifica del drift…</div>
+					{:else if drift}
+						<div class="drift-summary" class:drift-summary-warning={!drift.in_sync}>
+							<strong>{drift.in_sync ? 'Stato allineato' : 'Disallineamento rilevato'}</strong>
+							<span>
+								{driftCount === 0
+									? 'Nessuna anomalia'
+									: `${driftCount} ${driftCount === 1 ? 'anomalia' : 'anomalie'}`}
+							</span>
+						</div>
+
+						{#if driftCount === 0}
+							<p class="drift-empty">SQLite e nftables risultano allineati.</p>
+						{:else}
+							<div class="drift-list">
+								{#if drift.kernel_drifted_items.length > 0}
+									<h3>Endpoint attesi assenti da nftables</h3>
+									{#each drift.kernel_drifted_items as item (`kernel-${item.vmid}`)}
+										<div class="drift-item">
+											<strong>CT-{item.vmid}</strong>
+											<span>
+												{item.expected[0]} · {item.expected[2]} · {item.expected[1]}
+											</span>
+										</div>
+									{/each}
+								{/if}
+								{#if drift.db_pending_items.length > 0}
+									<h3>Provisioning non sincronizzato nel database</h3>
+									{#each drift.db_pending_items as item (`db-${item.vmid}`)}
+										<div class="drift-item">
+											<strong>CT-{item.vmid} · {item.actual_state}</strong>
+											<span>
+												Atteso: {item.desired_state} · {item.desired_vnet} · {item.desired_ip}
+											</span>
+											{#if item.last_error_msg}
+												<small>{item.last_error_code}: {item.last_error_msg}</small>
+											{/if}
+										</div>
+									{/each}
+								{/if}
+								{#if !drift.fwdd_in_sync && drift.kernel_drifted_items.length === 0}
+									<p class="drift-empty">fwdd segnala un disallineamento senza dettagli.</p>
+								{/if}
+							</div>
+						{/if}
+						<div class="diagnostic-footer">
+							<span>
+								{`Controllato ${new Intl.DateTimeFormat('it-IT', { timeStyle: 'medium' }).format(new Date(drift.checked_at))}`}
+							</span>
+							{#if driftLoading}<span>Aggiornamento…</span>{/if}
+						</div>
+					{:else}
+						<div class="diagnostic-empty">Verifica drift non disponibile.</div>
+					{/if}
+				</section>
 			</div>
 
 			<div class="table-panel">
