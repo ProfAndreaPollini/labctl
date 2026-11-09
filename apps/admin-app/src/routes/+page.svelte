@@ -135,7 +135,12 @@
 	}
 
 	function refreshAll() {
-		void Promise.all([loadContainers(), loadNetworkState(), loadSystemHealth(), loadProvisioningDrift()]);
+		void Promise.all([
+			loadContainers(),
+			loadNetworkState(),
+			loadSystemHealth(),
+			loadProvisioningDrift()
+		]);
 	}
 
 	function onSearchInput(event: Event) {

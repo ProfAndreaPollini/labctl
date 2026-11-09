@@ -35,7 +35,7 @@
             # Log per debug
             log_append ak_user {http.request.header.X-Authentik-Username}
             log_append ak_uid  {http.request.header.X-Authentik-Uid}
-            log_append ak_groups {http.request.header.X-Authentik-Groups}       
+            log_append ak_groups {http.request.header.X-Authentik-Groups}
 
             # 3. Gestione delle API
             @api path /api/*
