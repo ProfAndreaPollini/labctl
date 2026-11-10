@@ -88,6 +88,7 @@ class CurrentUser(BaseModel):
     id: int
     username: str
     display_name: str
+    object_guid: str
     ruolo: Literal["STUDENT", "TEACHER", "ADMIN"]
     classe_id: Optional[int] = None
     codice_classe: Optional[str] = None
@@ -243,6 +244,7 @@ def get_current_user(
             id=row.id,
             username=row.username,
             display_name=row.display_name,
+            object_guid=row.object_guid,
             ruolo=row.ruolo,
             classe_id=row.classe_id,
             codice_classe=row.codice_classe,
@@ -252,11 +254,19 @@ def get_current_user(
 
     # --- ONBOARDING AL PRIMO LOGIN ---
     groups_raw = [g.strip() for g in re.split(r"[,|]", x_remote_groups or "") if g.strip()]
-    ruolo: Literal["STUDENT", "TEACHER", "ADMIN"] = "STUDENT"
-    if any(g.upper() in ("ADMINS", "DOMAIN ADMINS", "LAB_ADMIN") for g in groups_raw):
-        ruolo = "ADMIN"
-    elif any(g.upper() in ("TEACHERS", "DOCENTI", "LAB_TEACHER") for g in groups_raw):
-        ruolo = "TEACHER"
+    normalized_groups = {group.upper() for group in groups_raw}
+    role_groups: Dict[Literal["ADMIN", "TEACHER", "STUDENT"], set[str]] = {
+        "ADMIN": {"ADMINS", "DOMAIN ADMINS", "ADMIN", "LAB_ADMIN"},
+        "TEACHER": {"TEACHERS", "DOCENTI", "TEACHER", "LAB_TEACHER"},
+        "STUDENT": {"STUDENTS", "STUDENTI", "STUDENT", "LAB_STUDENT"},
+    }
+    matched_roles = [role for role, names in role_groups.items() if normalized_groups & names]
+    if len(matched_roles) != 1:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Primo login fallito: l'utente deve appartenere a un solo gruppo di ruolo LabCtl.",
+        )
+    ruolo = matched_roles[0]
 
     classe_row = None
     if ruolo == "STUDENT":
@@ -293,6 +303,7 @@ def get_current_user(
         id=new_user_id,
         username=username,
         display_name=display_name,
+        object_guid=guid,
         ruolo=ruolo,
         classe_id=classe_row.id if classe_row else None,
         codice_classe=classe_row.codice_classe if classe_row else None,
@@ -347,6 +358,16 @@ def ensure_student_subnet(conn: Connection, user: CurrentUser) -> Any:
     return conn.execute(select(subnet_studenti).where(subnet_studenti.c.id == free_sub.id)).fetchone()
 
 
+def get_student_pool_id(user: CurrentUser) -> str:
+    """Deriva l'ID del pool Proxmox dall'UID Authentik, verificato da Caddy."""
+    if not re.fullmatch(r"\d{8}", user.object_guid):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="UID Authentik non valido: per gli studenti sono richieste esattamente 8 cifre.",
+        )
+    return f"p-{user.object_guid}"
+
+
 # =====================================================================
 # 1. ROUTER STUDENTE (/api/student/*)
 # =====================================================================
@@ -361,6 +382,7 @@ def get_my_network_parameters(
     Restituisce i parametri della /29 assegnata allo studente (inclusa la lista esplicita dei
     5 IP utilizzabili e il gateway .1) e l'elenco dei container registrati.
     """
+    get_student_pool_id(user)
     sub = ensure_student_subnet(conn, user)
     net_obj = ipaddress.IPv4Network(sub.subnet_cidr)
     usable_ips = [str(ip) for ip in list(net_obj.hosts())[1:]]  # Esclude il .1 (gateway)
@@ -443,6 +465,7 @@ def create_student_reservation(
     3. Interroga Proxmox per estrarre il MAC address e iniettare l'hookscript `pre-start`;
     4. Registra la prenotazione su SQLite, aggiorna i CSV di Vector e programma subito `fwdd`.
     """
+    expected_pool_id = get_student_pool_id(user)
     sub = ensure_student_subnet(conn, user)
     net_obj = ipaddress.IPv4Network(sub.subnet_cidr)
     usable_ips = {str(ip) for ip in list(net_obj.hosts())[1:]}
@@ -475,12 +498,13 @@ def create_student_reservation(
             ),
         )
 
-    # Verifica e preparazione container su Proxmox VE (lettura MAC + iniezione hookscript)
+    # Verifica e preparazione container su Proxmox VE (pool, MAC e hookscript)
     try:
         pve_node, mac_addr, pve_hostname = pve_client.inspect_and_prepare_lxc(
             vmid=payload.vmid,
             expected_username=user.username,
             expected_vnet=user.vnet_name or "",
+            expected_pool_id=expected_pool_id,
         )
     except ValueError as verr:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(verr)) from verr
@@ -698,6 +722,10 @@ def delete_student_reservation(
         fwdd_client.call("deprovision_anti_spoofing", vmid=vmid)
     except FwddClientError as ferr:
         logger.warning("Deprovisioning fwdd per VMID=%d fallito: %s", vmid, ferr.message)
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=f"Impossibile revocare la regola di rete per il VMID {vmid}: {ferr.message}",
+        ) from ferr
 
     conn.execute(delete(container_studenti).where(container_studenti.c.vmid == vmid))
     conn.commit()
@@ -1220,6 +1248,7 @@ def migrate_student_class(
         id=stu.id,
         username=stu.username,
         display_name=stu.display_name,
+        object_guid=stu.object_guid,
         ruolo="STUDENT",
         classe_id=target_cl.id,
         codice_classe=target_cl.codice_classe,

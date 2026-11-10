@@ -31,31 +31,36 @@ Stop any manually started Uvicorn process listening on `127.0.0.1:8000` before
 starting the service. Optional API environment variables can be set in
 `/etc/labctl/api.env`.
 
-## Admin SPA and Caddy
+## Admin and Student SPAs, Caddy
 
-The static Svelte app is built and served directly by Caddy; no Node process is
-needed at runtime. Build it with:
+The static Svelte apps are built and served directly by Caddy; no Node process
+is needed at runtime. Build each app with Node.js 22.17 or newer:
 
 ```bash
 cd apps/admin-app
-# Use Node.js 22.17 or newer.
 npm ci
+npm run build
+
+cd ../student-app
+npm ci
+npm run check
 npm run build
 ```
 
-The build is written to `apps/admin-app/build`. Configure `ADMIN_DOMAIN` and
-`AUTHENTIK_URL` in the Caddy service environment, then install
-[`config/Caddyfile`](./config/Caddyfile) in the Caddy configuration. Caddy
-protects the app and API with the Authentik outpost, strips untrusted
-`X-Remote-*` request headers, and maps the verified Authentik identity and group
-headers to the `X-Remote-*` headers consumed by FastAPI. Users must have the
-`ADMIN` role in LabCtl (or be onboarded for the first time through an Authentik
-group such as `LAB_ADMIN`) to use the administration API.
+The builds are written to `apps/admin-app/build` and `apps/student-app/build`.
+[`config/Caddyfile`](./config/Caddyfile) serves the admin app at
+`192.168.1.11` and the student app at `students.cluster.castelli.local`; the
+student hostname must resolve to the Caddy host. Configure a separate
+Authentik proxy application for each hostname, both through the existing
+outpost, and restrict them to `LAB_ADMIN` and `LAB_STUDENT` respectively.
+Caddy strips untrusted `X-Remote-*` request headers and maps the verified
+Authentik identity and groups to the headers consumed by FastAPI. Student
+onboarding also requires the student's class group (for example `4A-INF`).
+There is not yet a teacher frontend in this repository.
 
-For an IP-based deployment, `ADMIN_DOMAIN` must be the exact site IP without a
-scheme (for example `192.168.1.11`), and `AUTHENTIK_URL` must point to the
-Authentik outpost (for example `http://192.168.1.71:9000`). After changing the
-Caddy service environment or Caddyfile, validate the config and reload Caddy:
+`AUTHENTIK_URL` must point to the Authentik outpost (for example
+`http://192.168.1.71:9000`). After changing the Caddy service environment or
+Caddyfile, validate the config and reload Caddy:
 
 ```bash
 sudo caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile
@@ -66,3 +71,9 @@ The network dashboard reads authorized endpoints from `fwdd`'s nftables set
 and active flows from `conntrack`. Install the updated daemon before restarting
 `labctl-fwdd.service`; its startup reconciles firewall and route state, so plan
 the restart accordingly. Install `conntrack` on the host to show active flows.
+
+The backend requires exactly one role group (`LAB_STUDENT`, `LAB_TEACHER`, or
+`LAB_ADMIN`). Proxmox pool membership is derived from the verified eight-digit
+Authentik UID as `p-<uid>`. Proxmox ACLs must prevent students from changing
+pool membership or moving containers to another pool; only an administrator
+should be able to do that.

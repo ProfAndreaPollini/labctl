@@ -134,14 +134,21 @@ class ProxmoxClusterClient:
 
         return {"mode": "live", "version": version}
 
-    def inspect_and_prepare_lxc(self, vmid: int, expected_username: str, expected_vnet: str) -> Tuple[str, str, str]:
+    def inspect_and_prepare_lxc(
+        self,
+        vmid: int,
+        expected_username: str,
+        expected_vnet: str,
+        expected_pool_id: str,
+    ) -> Tuple[str, str, str]:
         """
-        1. Individua su quale nodo del cluster si trova il container `vmid`.
-        2. Legge la configurazione di `net0` per estrarre MAC (`hwaddr`) e `bridge` (`vnet`).
-        3. Verifica che il bridge corrisponda alla VNet della classe dello studente.
-        4. Inietta `hookscript: local:snippets/student-net-guard.py` se non presente.
+        Verifica membership nel pool dello studente, singola NIC sulla VNet corretta,
+        legge il MAC e installa l'hookscript se necessario.
         Ritorna: (node_name, mac_address_lower, hostname)
         """
+        if not re.fullmatch(r"p-\d{8}", expected_pool_id):
+            raise ValueError("Pool Proxmox atteso non valido.")
+
         if self.mock_mode:
             # Generazione deterministica per ambienti di sviluppo/test locale
             oct5 = (vmid >> 8) & 0xFF
@@ -169,12 +176,26 @@ class ProxmoxClusterClient:
             if not vm_entry:
                 raise ValueError(f"Container LXC con VMID {vmid} non trovato nel cluster Proxmox.")
 
+            actual_pool_id = vm_entry.get("pool")
+            if actual_pool_id != expected_pool_id:
+                raise ValueError(
+                    f"Il container VMID {vmid} appartiene al pool {actual_pool_id or 'nessuno'}, "
+                    f"non al tuo pool {expected_pool_id}."
+                )
+
             node = vm_entry["node"]
 
             # 2. Legge la configurazione del container
             r_cfg = client.get(f"/api2/json/nodes/{node}/lxc/{vmid}/config")
             r_cfg.raise_for_status()
             cfg = r_cfg.json().get("data", {})
+
+            network_interfaces = sorted(key for key in cfg if re.fullmatch(r"net\d+", key))
+            if network_interfaces != ["net0"]:
+                raise ValueError(
+                    f"Il container VMID {vmid} deve avere una sola interfaccia di rete (net0); "
+                    "rimuovi le interfacce aggiuntive prima di associarlo."
+                )
 
             net0 = cfg.get("net0", "")
             if not net0:
